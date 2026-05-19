@@ -1,4 +1,5 @@
 import os
+import requests
 from datetime import datetime
 from flask import Flask, request, jsonify
 from supabase import create_client, Client
@@ -14,6 +15,19 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 HOT_KEYWORDS = ["giá", "bao nhiêu", "mua", "đặt hàng", "order", "báo giá", "chi phí", "phí", "mất bao nhiêu"]
 WARM_KEYWORDS = ["thông tin", "tư vấn", "hỏi", "như thế nào", "có không", "được không", "hợp tác"]
+
+
+def get_sender_name(sender_id):
+    try:
+        resp = requests.get(
+            f"https://graph.facebook.com/{sender_id}",
+            params={"fields": "name", "access_token": PAGE_ACCESS_TOKEN},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return resp.json().get("name")
+    except Exception:
+        return None
 
 
 def score_lead(text):
@@ -53,8 +67,11 @@ def receive_webhook():
                 message = messaging.get("message", {})
                 text = message.get("text")
 
+                sender_name = get_sender_name(sender_id) if sender_id else None
+
                 record = {
                     "sender_id": sender_id,
+                    "sender_name": sender_name,
                     "page_id": page_id,
                     "timestamp": timestamp,
                     "received_at": datetime.utcnow().isoformat() + "Z",
