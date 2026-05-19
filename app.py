@@ -1,31 +1,19 @@
-import json
 import os
 from datetime import datetime
 from flask import Flask, request, jsonify
+from supabase import create_client, Client
 
 app = Flask(__name__)
 
 VERIFY_TOKEN = "lagtuz2026"
 PAGE_ACCESS_TOKEN = os.environ.get("PAGE_ACCESS_TOKEN", "")
-MESSAGES_FILE = "messages.json"
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 HOT_KEYWORDS = ["giá", "bao nhiêu", "mua", "đặt hàng", "order", "báo giá", "chi phí", "phí", "mất bao nhiêu"]
 WARM_KEYWORDS = ["thông tin", "tư vấn", "hỏi", "như thế nào", "có không", "được không", "hợp tác"]
-
-
-def load_messages():
-    if not os.path.exists(MESSAGES_FILE):
-        return []
-    with open(MESSAGES_FILE, "r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return []
-
-
-def save_messages(messages):
-    with open(MESSAGES_FILE, "w", encoding="utf-8") as f:
-        json.dump(messages, f, ensure_ascii=False, indent=2)
 
 
 def score_lead(text):
@@ -76,28 +64,28 @@ def receive_webhook():
                     "score": score_lead(text),
                 }
 
-                messages = load_messages()
-                messages.append(record)
-                save_messages(messages)
+                supabase.table("messages").insert(record).execute()
 
     return "EVENT_RECEIVED", 200
 
 
 @app.route("/messages", methods=["GET"])
 def get_messages():
-    messages = load_messages()
     score_filter = request.args.get("score")
-    if score_filter:
-        messages = [m for m in messages if m.get("score", "").lower() == score_filter.lower()]
     page = int(request.args.get("page", 1))
     per_page = int(request.args.get("per_page", 50))
-    start = (page - 1) * per_page
-    end = start + per_page
+    offset = (page - 1) * per_page
+
+    query = supabase.table("messages").select("*", count="exact")
+    if score_filter:
+        query = query.ilike("score", score_filter)
+    result = query.range(offset, offset + per_page - 1).execute()
+
     return jsonify({
-        "total": len(messages),
+        "total": result.count,
         "page": page,
         "per_page": per_page,
-        "messages": messages[start:end],
+        "messages": result.data,
     })
 
 
