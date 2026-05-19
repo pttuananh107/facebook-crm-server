@@ -1,6 +1,6 @@
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify
 from supabase import create_client, Client
 
@@ -86,7 +86,7 @@ def receive_webhook():
                     "sender_name": sender_name,
                     "page_id": page_id,
                     "timestamp": timestamp,
-                    "received_at": datetime.utcnow().isoformat() + "Z",
+                    "received_at": datetime.now(timezone(timedelta(hours=7))).isoformat(),
                     "message_id": message.get("mid"),
                     "text": text,
                     "attachments": message.get("attachments"),
