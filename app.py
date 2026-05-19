@@ -6,7 +6,11 @@ from flask import Flask, request, jsonify
 app = Flask(__name__)
 
 VERIFY_TOKEN = "lagtuz2026"
+PAGE_ACCESS_TOKEN = os.environ.get("PAGE_ACCESS_TOKEN", "")
 MESSAGES_FILE = "messages.json"
+
+HOT_KEYWORDS = ["giá", "bao nhiêu", "mua", "đặt hàng", "order", "báo giá", "chi phí", "phí", "mất bao nhiêu"]
+WARM_KEYWORDS = ["thông tin", "tư vấn", "hỏi", "như thế nào", "có không", "được không", "hợp tác"]
 
 
 def load_messages():
@@ -19,11 +23,20 @@ def load_messages():
             return []
 
 
-def save_message(message_data):
-    messages = load_messages()
-    messages.append(message_data)
+def save_messages(messages):
     with open(MESSAGES_FILE, "w", encoding="utf-8") as f:
         json.dump(messages, f, ensure_ascii=False, indent=2)
+
+
+def score_lead(text):
+    if not text or not text.strip():
+        return "Cold"
+    text_lower = text.lower()
+    if any(kw in text_lower for kw in HOT_KEYWORDS):
+        return "Hot"
+    if any(kw in text_lower for kw in WARM_KEYWORDS):
+        return "Warm"
+    return "Cold"
 
 
 @app.route("/webhook", methods=["GET"])
@@ -45,21 +58,27 @@ def receive_webhook():
 
     if data.get("object") == "page":
         for entry in data.get("entry", []):
+            page_id = entry.get("id")
             for messaging in entry.get("messaging", []):
                 sender_id = messaging.get("sender", {}).get("id")
                 timestamp = messaging.get("timestamp")
                 message = messaging.get("message", {})
+                text = message.get("text")
 
                 record = {
                     "sender_id": sender_id,
+                    "page_id": page_id,
                     "timestamp": timestamp,
                     "received_at": datetime.utcnow().isoformat() + "Z",
                     "message_id": message.get("mid"),
-                    "text": message.get("text"),
+                    "text": text,
                     "attachments": message.get("attachments"),
-                    "raw": messaging,
+                    "score": score_lead(text),
                 }
-                save_message(record)
+
+                messages = load_messages()
+                messages.append(record)
+                save_messages(messages)
 
     return "EVENT_RECEIVED", 200
 
@@ -67,6 +86,9 @@ def receive_webhook():
 @app.route("/messages", methods=["GET"])
 def get_messages():
     messages = load_messages()
+    score_filter = request.args.get("score")
+    if score_filter:
+        messages = [m for m in messages if m.get("score", "").lower() == score_filter.lower()]
     page = int(request.args.get("page", 1))
     per_page = int(request.args.get("per_page", 50))
     start = (page - 1) * per_page
