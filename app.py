@@ -76,6 +76,9 @@ def receive_webhook():
                 message = messaging.get("message", {})
                 text = message.get("text")
 
+                if not text or not text.strip():
+                    continue
+
                 sender_name = get_sender_name(sender_id) if sender_id else None
 
                 record = {
