@@ -20,12 +20,21 @@ WARM_KEYWORDS = ["thông tin", "tư vấn", "hỏi", "như thế nào", "có kh�
 def get_sender_name(sender_id):
     try:
         resp = requests.get(
-            f"https://graph.facebook.com/{sender_id}",
-            params={"fields": "name", "access_token": PAGE_ACCESS_TOKEN},
+            "https://graph.facebook.com/v19.0/me/conversations",
+            params={"fields": "participants,id", "access_token": PAGE_ACCESS_TOKEN},
             timeout=5,
         )
         resp.raise_for_status()
-        return resp.json().get("name")
+        conversations = resp.json().get("data", [])
+        for conv in conversations:
+            participants = conv.get("participants", {}).get("data", [])
+            participant_ids = [p.get("id") for p in participants]
+            if sender_id in participant_ids:
+                for p in participants:
+                    if p.get("id") != sender_id:
+                        continue
+                    return p.get("name")
+        return None
     except Exception:
         return None
 
