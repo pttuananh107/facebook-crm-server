@@ -1,4 +1,5 @@
 import os
+import uuid
 import requests
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify
@@ -14,6 +15,8 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 HOT_KEYWORDS = ["giá", "bao nhiêu", "mua", "đặt hàng", "order", "báo giá", "chi phí", "phí", "mất bao nhiêu"]
 WARM_KEYWORDS = ["thông tin", "tư vấn", "hỏi", "như thế nào", "có không", "được không", "hợp tác"]
+
+TZ7 = timezone(timedelta(hours=7))
 
 
 def get_page_token(page_id):
@@ -46,15 +49,64 @@ def get_sender_name(sender_id, page_token):
         return None
 
 
-def score_lead(text):
-    if not text or not text.strip():
+def score_lead(messages):
+    customer_text = " ".join(m.get("text", "") for m in messages if m.get("role") == "customer")
+    if not customer_text.strip():
         return "Cold"
-    text_lower = text.lower()
+    text_lower = customer_text.lower()
     if any(kw in text_lower for kw in HOT_KEYWORDS):
         return "Hot"
     if any(kw in text_lower for kw in WARM_KEYWORDS):
         return "Warm"
     return "Cold"
+
+
+def find_or_create_conversation(sender_id, page_id, sender_name):
+    cutoff = (datetime.now(TZ7) - timedelta(days=3)).isoformat()
+    try:
+        result = (
+            supabase.table("conversations")
+            .select("*")
+            .eq("sender_id", sender_id)
+            .eq("page_id", page_id)
+            .gte("last_message_at", cutoff)
+            .order("last_message_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+    except Exception:
+        pass
+
+    now = datetime.now(TZ7).isoformat()
+    new_conv = {
+        "conversation_id": str(uuid.uuid4()),
+        "sender_id": sender_id,
+        "sender_name": sender_name,
+        "page_id": page_id,
+        "messages": [],
+        "message_count": 0,
+        "score": "Cold",
+        "last_message_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    result = supabase.table("conversations").insert(new_conv).execute()
+    return result.data[0]
+
+
+def append_message_to_conversation(conv, new_msg):
+    messages = list(conv.get("messages") or [])
+    messages.append(new_msg)
+    now = datetime.now(TZ7).isoformat()
+    supabase.table("conversations").update({
+        "messages": messages,
+        "message_count": len(messages),
+        "score": score_lead(messages),
+        "last_message_at": now,
+        "updated_at": now,
+    }).eq("conversation_id", conv["conversation_id"]).execute()
 
 
 @app.route("/webhook", methods=["GET"])
@@ -82,29 +134,38 @@ def receive_webhook():
                 continue
 
             for messaging in entry.get("messaging", []):
-                sender_id = messaging.get("sender", {}).get("id")
-                timestamp = messaging.get("timestamp")
                 message = messaging.get("message", {})
                 text = message.get("text")
-
                 if not text or not text.strip():
                     continue
 
-                sender_name = get_sender_name(sender_id, page_token) if sender_id else None
+                is_echo = message.get("is_echo", False)
+                if is_echo:
+                    role = "page"
+                    sender_id = messaging.get("recipient", {}).get("id")
+                else:
+                    role = "customer"
+                    sender_id = messaging.get("sender", {}).get("id")
 
-                record = {
-                    "sender_id": sender_id,
-                    "sender_name": sender_name,
-                    "page_id": page_id,
-                    "timestamp": timestamp,
-                    "received_at": datetime.now(timezone(timedelta(hours=7))).isoformat(),
-                    "message_id": message.get("mid"),
+                if not sender_id:
+                    continue
+
+                timestamp_ms = messaging.get("timestamp")
+                timestamp_iso = (
+                    datetime.fromtimestamp(timestamp_ms / 1000, tz=TZ7).isoformat()
+                    if timestamp_ms else datetime.now(TZ7).isoformat()
+                )
+
+                sender_name = get_sender_name(sender_id, page_token) if not is_echo else None
+
+                conv = find_or_create_conversation(sender_id, page_id, sender_name)
+                append_message_to_conversation(conv, {
+                    "role": role,
                     "text": text,
-                    "attachments": message.get("attachments"),
-                    "score": score_lead(text),
-                }
-
-                supabase.table("messages").insert(record).execute()
+                    "timestamp": timestamp_iso,
+                    "message_id": message.get("mid"),
+                    "sender_name": sender_name,
+                })
 
     return "EVENT_RECEIVED", 200
 
@@ -116,10 +177,10 @@ def get_messages():
     per_page = int(request.args.get("per_page", 50))
     offset = (page - 1) * per_page
 
-    query = supabase.table("messages").select("*", count="exact")
+    query = supabase.table("conversations").select("*", count="exact")
     if score_filter:
         query = query.ilike("score", score_filter)
-    result = query.range(offset, offset + per_page - 1).execute()
+    result = query.order("last_message_at", desc=True).range(offset, offset + per_page - 1).execute()
 
     return jsonify({
         "total": result.count,
