@@ -7,7 +7,6 @@ from supabase import create_client, Client
 app = Flask(__name__)
 
 VERIFY_TOKEN = "lagtuz2026"
-PAGE_ACCESS_TOKEN = os.environ.get("PAGE_ACCESS_TOKEN", "")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
@@ -17,11 +16,19 @@ HOT_KEYWORDS = ["giá", "bao nhiêu", "mua", "đặt hàng", "order", "báo giá
 WARM_KEYWORDS = ["thông tin", "tư vấn", "hỏi", "như thế nào", "có không", "được không", "hợp tác"]
 
 
-def get_sender_name(sender_id):
+def get_page_token(page_id):
+    try:
+        result = supabase.table("pages").select("access_token").eq("page_id", page_id).single().execute()
+        return result.data.get("access_token") if result.data else None
+    except Exception:
+        return None
+
+
+def get_sender_name(sender_id, page_token):
     try:
         resp = requests.get(
             "https://graph.facebook.com/v19.0/me/conversations",
-            params={"fields": "participants,id", "access_token": PAGE_ACCESS_TOKEN},
+            params={"fields": "participants,id", "access_token": page_token},
             timeout=5,
         )
         resp.raise_for_status()
@@ -70,6 +77,10 @@ def receive_webhook():
     if data.get("object") == "page":
         for entry in data.get("entry", []):
             page_id = entry.get("id")
+            page_token = get_page_token(page_id)
+            if not page_token:
+                continue
+
             for messaging in entry.get("messaging", []):
                 sender_id = messaging.get("sender", {}).get("id")
                 timestamp = messaging.get("timestamp")
@@ -79,7 +90,7 @@ def receive_webhook():
                 if not text or not text.strip():
                     continue
 
-                sender_name = get_sender_name(sender_id) if sender_id else None
+                sender_name = get_sender_name(sender_id, page_token) if sender_id else None
 
                 record = {
                     "sender_id": sender_id,
