@@ -109,6 +109,69 @@ def append_message_to_conversation(conv, new_msg):
     }).eq("conversation_id", conv["conversation_id"]).execute()
 
 
+def extract_referral_info(referral):
+    if not referral:
+        return None, None, None
+    ad_id = referral.get("ad_id")
+    ads_ctx = referral.get("ads_context_data", {})
+    ad_title = ads_ctx.get("ad_title")
+    referral_source = referral.get("source")
+    return ad_id, ad_title, referral_source
+
+
+def update_conversation_ad_info(conv, ad_id, ad_title, referral_source):
+    if conv.get("ad_id"):
+        return
+    supabase.table("conversations").update({
+        "ad_id": ad_id,
+        "ad_title": ad_title,
+        "referral_source": referral_source,
+        "updated_at": datetime.now(TZ7).isoformat(),
+    }).eq("conversation_id", conv["conversation_id"]).execute()
+
+
+def find_conversation_by_thread_id(thread_id, page_id):
+    try:
+        result = (
+            supabase.table("conversations")
+            .select("*")
+            .eq("thread_id", thread_id)
+            .eq("page_id", page_id)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+    except Exception:
+        return None
+
+
+def find_conversation_by_sender_id(sender_id, page_id):
+    try:
+        result = (
+            supabase.table("conversations")
+            .select("*")
+            .eq("sender_id", sender_id)
+            .eq("page_id", page_id)
+            .order("last_message_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+    except Exception:
+        return None
+
+
+def append_label_to_conversation(conv, label_name):
+    labels = list(conv.get("labels") or [])
+    if label_name in labels:
+        return
+    labels.append(label_name)
+    supabase.table("conversations").update({
+        "labels": labels,
+        "updated_at": datetime.now(TZ7).isoformat(),
+    }).eq("conversation_id", conv["conversation_id"]).execute()
+
+
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
     mode = request.args.get("hub.mode")
@@ -129,12 +192,47 @@ def receive_webhook():
     if data.get("object") == "page":
         for entry in data.get("entry", []):
             page_id = entry.get("id")
+
+            # inbox_labels: entry.changes[].field == "inbox_labels"
+            for change in entry.get("changes", []):
+                if change.get("field") != "inbox_labels":
+                    continue
+                value = change.get("value", {})
+                label_name = value.get("label_name")
+                if not label_name:
+                    continue
+                conv = None
+                thread_id = value.get("thread_id")
+                sender_id = value.get("sender_id")
+                if thread_id:
+                    conv = find_conversation_by_thread_id(thread_id, page_id)
+                if not conv and sender_id:
+                    conv = find_conversation_by_sender_id(sender_id, page_id)
+                if conv:
+                    append_label_to_conversation(conv, label_name)
+
+            if not entry.get("messaging"):
+                continue
+
             page_token = get_page_token(page_id)
             if not page_token:
                 continue
 
             for messaging in entry.get("messaging", []):
+                referral = messaging.get("referral")
                 message = messaging.get("message", {})
+
+                # messaging_referrals: referral present but no message text
+                if referral and not message:
+                    sender_id = messaging.get("sender", {}).get("id")
+                    if not sender_id:
+                        continue
+                    sender_name = get_sender_name(sender_id, page_token)
+                    conv = find_or_create_conversation(sender_id, page_id, sender_name)
+                    ad_id, ad_title, referral_source = extract_referral_info(referral)
+                    update_conversation_ad_info(conv, ad_id, ad_title, referral_source)
+                    continue
+
                 text = message.get("text")
                 if not text or not text.strip():
                     continue
@@ -166,6 +264,11 @@ def receive_webhook():
                     "message_id": message.get("mid"),
                     "sender_name": sender_name,
                 })
+
+                # Referral kèm theo tin nhắn thường
+                if referral:
+                    ad_id, ad_title, referral_source = extract_referral_info(referral)
+                    update_conversation_ad_info(conv, ad_id, ad_title, referral_source)
 
     return "EVENT_RECEIVED", 200
 
